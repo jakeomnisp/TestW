@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FocusMind AI | 학습 집중도 분석 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --success: #10b981;
+            --danger: #f43f5e;
+            --bg: #f8fafc;
+        }
+        body { 
+            font-family: 'Plus Jakarta Sans', sans-serif; 
+            background-color: var(--bg);
+            color: #1e293b;
+        }
+        .glass {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        .view-canvas-container {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 4/3;
+            background: #020617;
+            border-radius: 24px;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+        }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        video { display: none; }
+        .tab-content { display: none; animation: fadeIn 0.4s ease-out; }
+        .tab-content.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        
+        .collecting-glow-0 { box-shadow: 0 0 0 4px var(--success), 0 0 20px var(--success); }
+        .collecting-glow-1 { box-shadow: 0 0 0 4px var(--danger), 0 0 20px var(--danger); }
+        
+        .score-gradient {
+            background: conic-gradient(var(--primary) var(--percentage), #e2e8f0 0);
+        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+</head>
+<body class="antialiased overflow-x-hidden">
+
+    <!-- 사이드 배경 데코 -->
+    <div class="fixed top-0 right-0 -z-10 w-[500px] h-[500px] bg-indigo-100/50 rounded-full blur-[120px]"></div>
+    <div class="fixed bottom-0 left-0 -z-10 w-[400px] h-[400px] bg-emerald-50/50 rounded-full blur-[100px]"></div>
+
+    <div class="max-w-[1400px] mx-auto px-6 py-8 min-h-screen flex flex-col">
+        
+        <!-- 네비게이션 & 헤더 -->
+        <header class="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-10">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-200">
+                    <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-extrabold tracking-tight text-slate-900">FocusMind <span class="text-indigo-600">AI</span></h1>
+                    <p class="text-slate-500 text-sm font-medium">실시간 행동 분석 및 집중도 정량화 시스템</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-2 p-1 bg-white/60 glass rounded-2xl">
+                <button onclick="switchTab('analysis')" id="tab-analysis" class="px-6 py-2.5 rounded-xl text-sm font-bold transition-all bg-white text-indigo-600 shadow-sm">실시간 분석</button>
+                <button onclick="switchTab('training')" id="tab-training" class="px-6 py-2.5 rounded-xl text-sm font-bold transition-all text-slate-500 hover:text-slate-700">데이터 수집 및 학습</button>
+            </div>
+        </header>
+
+        <main class="grid grid-cols-1 lg:grid-cols-12 gap-8 flex-grow">
+            
+            <!-- 왼쪽: 고정 비주얼 엔진 -->
+            <div class="lg:col-span-5 flex flex-col gap-6">
+                <div id="video-wrapper" class="view-canvas-container border border-white/50 group">
+                    <video id="input-video" playsinline></video>
+                    <canvas id="output-canvas"></canvas>
+                    
+                    <div id="loading-overlay" class="absolute inset-0 z-20 flex items-center justify-center bg-slate-900/80 backdrop-blur-sm hidden">
+                        <div class="text-center">
+                            <div class="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                            <p class="text-white font-bold text-sm">Neural Engine 로딩 중...</p>
+                        </div>
+                    </div>
+
+                    <div class="absolute bottom-6 left-6 right-6 flex items-center justify-between z-10">
+                        <div class="flex items-center gap-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
+                            <div id="cam-status-dot" class="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></div>
+                            <span id="cam-status-text" class="text-[11px] font-bold text-white uppercase tracking-wider">연결 대기</span>
+                        </div>
+                        <button id="start-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-xl text-xs font-bold shadow-xl shadow-indigo-500/20 transition-all active:scale-95">카메라 활성화</button>
+                    </div>
+
+                    <div id="recording-label" class="absolute top-6 right-6 bg-rose-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest hidden animate-bounce shadow-lg shadow-rose-500/50">
+                        ● Live Recording
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="glass p-5 rounded-3xl border border-white">
+                        <p class="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Neural Input</p>
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-bold text-slate-700">얼굴 랜드마크</span>
+                            <span id="face-badge" class="px-2 py-1 bg-slate-100 text-slate-400 rounded-lg text-[10px] font-bold">대기</span>
+                        </div>
+                    </div>
+                    <div class="glass p-5 rounded-3xl border border-white">
+                        <p class="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Posture Tracker</p>
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-bold text-slate-700">신체 포즈</span>
+                            <span id="pose-badge" class="px-2 py-1 bg-slate-100 text-slate-400 rounded-lg text-[10px] font-bold">대기</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 오른쪽: 동적 콘텐츠 영역 -->
+            <div class="lg:col-span-7">
+                
+                <!-- 분석 탭 -->
+                <div id="content-analysis" class="tab-content active space-y-6">
+                    <div class="glass p-8 rounded-[32px] border border-white shadow-xl shadow-slate-200/50">
+                        <div class="flex justify-between items-center mb-10">
+                            <h3 class="text-xl font-extrabold text-slate-800">실시간 집중도 스코어</h3>
+                            <div id="status-chip" class="px-4 py-1.5 bg-slate-100 text-slate-500 rounded-full text-xs font-black uppercase tracking-widest">분석 대기</div>
+                        </div>
+
+                        <div class="flex flex-col md:flex-row items-center gap-12">
+                            <!-- 커스텀 원형 프로그래스 -->
+                            <div class="relative">
+                                <svg class="w-48 h-48 -rotate-90">
+                                    <circle cx="96" cy="96" r="84" stroke="currentColor" stroke-width="12" fill="transparent" class="text-slate-100" />
+                                    <circle id="score-circle" cx="96" cy="96" r="84" stroke="currentColor" stroke-width="12" fill="transparent" stroke-dasharray="527" stroke-dashoffset="527" stroke-linecap="round" class="text-indigo-600 transition-all duration-1000" />
+                                </svg>
+                                <div class="absolute inset-0 flex flex-col items-center justify-center">
+                                    <span id="focus-score" class="text-5xl font-black text-slate-900">--</span>
+                                    <span class="text-[10px] font-bold text-slate-400 uppercase mt-1">Focus Point</span>
+                                </div>
+                            </div>
+
+                            <div class="flex-1 w-full space-y-8">
+                                <div>
+                                    <div class="flex justify-between items-end mb-3">
+                                        <span class="text-sm font-bold text-slate-500 uppercase">종합 집중 상태</span>
+                                        <span id="focus-label" class="text-lg font-extrabold text-slate-300">N/A</span>
+                                    </div>
+                                    <div class="h-4 bg-slate-100 rounded-full overflow-hidden p-1">
+                                        <div id="focus-bar" class="h-full bg-indigo-500 rounded-full transition-all duration-700" style="width: 0%"></div>
+                                    </div>
+                                </div>
+
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div class="bg-indigo-50/50 p-4 rounded-2xl border border-indigo-100">
+                                        <p class="text-[10px] font-bold text-indigo-400 uppercase mb-1">상체 자세</p>
+                                        <p id="pose-detail" class="text-sm font-bold text-slate-700">분석 중...</p>
+                                    </div>
+                                    <div class="bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100">
+                                        <p class="text-[10px] font-bold text-emerald-400 uppercase mb-1">시선 이탈</p>
+                                        <p id="eye-detail" class="text-sm font-bold text-slate-700">분석 중...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 실시간 로그 (터미널 스타일) -->
+                    <div class="bg-slate-900 rounded-[32px] p-6 shadow-2xl overflow-hidden border border-slate-800">
+                        <div class="flex items-center gap-2 mb-4 border-b border-slate-800 pb-4">
+                            <div class="flex gap-1.5">
+                                <div class="w-3 h-3 rounded-full bg-rose-500/50"></div>
+                                <div class="w-3 h-3 rounded-full bg-amber-500/50"></div>
+                                <div class="w-3 h-3 rounded-full bg-emerald-500/50"></div>
+                            </div>
+                            <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-2">Console Diagnostics</span>
+                        </div>
+                        <div id="log-container" class="font-mono text-[11px] text-indigo-300/80 h-32 overflow-y-auto space-y-2 scrollbar-hide">
+                            <div class="opacity-50"># 시스템 커널 대기 중...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 학습 탭 -->
+                <div id="content-training" class="tab-content space-y-6">
+                    <div class="glass p-8 rounded-[32px] border border-white shadow-xl shadow-slate-200/50">
+                        <div class="mb-8">
+                            <h3 class="text-xl font-extrabold text-slate-800">데이터셋 구축</h3>
+                            <p class="text-sm text-slate-500 font-medium">실시간 웹캠 화면을 보며 특정 행동 상태를 기록하세요.</p>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+                            <!-- Class A -->
+                            <div class="group">
+                                <button 
+                                    onmousedown="startCollecting(0)" onmouseup="stopCollecting()"
+                                    ontouchstart="startCollecting(0)" ontouchend="stopCollecting()"
+                                    class="w-full text-left p-6 rounded-3xl bg-emerald-50 border-2 border-emerald-100 hover:border-emerald-500 transition-all active:scale-[0.98] focus:outline-none">
+                                    <div class="flex justify-between items-start mb-6">
+                                        <div class="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm">
+                                            <svg class="w-6 h-6 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                        </div>
+                                        <div class="text-right">
+                                            <span class="text-3xl font-black text-emerald-600" id="count-focus">0</span>
+                                            <p class="text-[10px] font-bold text-emerald-400">SAMPLES</p>
+                                        </div>
+                                    </div>
+                                    <h4 class="text-lg font-extrabold text-emerald-900 mb-1">집중 상태</h4>
+                                    <p class="text-xs text-emerald-600/70 leading-tight">정면 응시, 정자세, 필기 등 학습에 집중하고 있는 모습</p>
+                                </button>
+                            </div>
+
+                            <!-- Class B -->
+                            <div class="group">
+                                <button 
+                                    onmousedown="startCollecting(1)" onmouseup="stopCollecting()"
+                                    ontouchstart="startCollecting(1)" ontouchend="stopCollecting()"
+                                    class="w-full text-left p-6 rounded-3xl bg-rose-50 border-2 border-rose-100 hover:border-rose-500 transition-all active:scale-[0.98] focus:outline-none">
+                                    <div class="flex justify-between items-start mb-6">
+                                        <div class="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm">
+                                            <svg class="w-6 h-6 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                                        </div>
+                                        <div class="text-right">
+                                            <span class="text-3xl font-black text-rose-600" id="count-distract">0</span>
+                                            <p class="text-[10px] font-bold text-rose-400">SAMPLES</p>
+                                        </div>
+                                    </div>
+                                    <h4 class="text-lg font-extrabold text-rose-900 mb-1">비집중 상태</h4>
+                                    <p class="text-xs text-rose-600/70 leading-tight">엎드림, 고개 숙임, 스마트폰 사용 등 주의가 산만해진 모습</p>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="p-6 bg-slate-50 rounded-[28px] border border-slate-100">
+                            <div class="flex flex-col md:flex-row gap-8 items-center">
+                                <div class="flex-1 w-full space-y-3">
+                                    <div class="flex justify-between">
+                                        <label class="text-[10px] font-black text-slate-400 uppercase">Training Depth (Epochs)</label>
+                                        <span id="epoch-display" class="text-xs font-black text-indigo-600">30</span>
+                                    </div>
+                                    <input id="epoch-input" type="range" min="10" max="100" value="30" class="w-full h-2 bg-slate-200 rounded-full appearance-none cursor-pointer accent-indigo-600">
+                                </div>
+                                <div class="flex gap-3 w-full md:w-auto">
+                                    <button onclick="resetData()" class="flex-1 md:flex-none px-6 py-3 rounded-2xl text-xs font-bold text-slate-400 hover:text-slate-600 transition-all">전체 초기화</button>
+                                    <button id="train-btn" disabled class="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 disabled:opacity-30 text-white px-8 py-4 rounded-2xl font-black shadow-xl shadow-indigo-200 transition-all text-sm">신경망 학습 시작</button>
+                                </div>
+                            </div>
+
+                            <div id="train-progress-container" class="mt-8 hidden">
+                                <div class="flex justify-between text-[10px] font-black text-slate-400 mb-2">
+                                    <span id="train-status" class="animate-pulse">OPTIMIZING PARAMETERS...</span>
+                                    <span id="train-percent">0%</span>
+                                </div>
+                                <div class="h-2.5 bg-white rounded-full overflow-hidden border border-slate-200">
+                                    <div id="train-progress-bar" class="h-full bg-indigo-600 rounded-full transition-all duration-300" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 커스텀 세련된 모달 -->
+    <div id="modal" class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm hidden p-6">
+        <div class="bg-white rounded-[40px] p-10 max-w-sm w-full shadow-2xl border border-white">
+            <div class="w-16 h-16 bg-indigo-50 rounded-3xl flex items-center justify-center mb-6">
+                <svg class="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <h3 id="modal-title" class="text-2xl font-black text-slate-900 mb-2">Notice</h3>
+            <p id="modal-body" class="text-slate-500 font-medium leading-relaxed mb-10 text-sm">내용입니다.</p>
+            <button onclick="closeModal()" class="w-full bg-slate-900 hover:bg-black text-white py-4 rounded-2xl font-black shadow-lg transition-all active:scale-[0.98]">확인하였습니다</button>
+        </div>
+    </div>
+
+    <script type="module">
+        // 전역 상태 변수
+        let videoElement, canvasElement, canvasCtx;
+        let faceMesh, pose, camera;
+        let classifier;
+        let trainingData = [];
+        let isCollecting = false;
+        let currentLabel = null;
+        let isTrained = false;
+
+        // 초기 로딩
+        window.onload = () => {
+            videoElement = document.getElementById('input-video');
+            canvasElement = document.getElementById('output-canvas');
+            canvasCtx = canvasElement.getContext('2d');
+
+            setupAI();
+            initClassifier();
+            
+            document.getElementById('start-btn').addEventListener('click', startCamera);
+            document.getElementById('train-btn').addEventListener('click', trainModel);
+            document.getElementById('epoch-input').addEventListener('input', (e) => {
+                document.getElementById('epoch-display').innerText = e.target.value;
+            });
+
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+        };
+
+        function resizeCanvas() {
+            const wrapper = document.getElementById('video-wrapper');
+            canvasElement.width = wrapper.clientWidth;
+            canvasElement.height = wrapper.clientHeight;
+        }
+
+        function setupAI() {
+            faceMesh = new FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+            faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+            faceMesh.onResults(onResults);
+
+            pose = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
+            pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+            pose.onResults(onResults);
+        }
+
+        function initClassifier() {
+            classifier = tf.sequential();
+            classifier.add(tf.layers.dense({ units: 128, activation: 'relu', inputShape: [120] }));
+            classifier.add(tf.layers.dropout({ rate: 0.3 }));
+            classifier.add(tf.layers.dense({ units: 64, activation: 'relu' }));
+            classifier.add(tf.layers.dense({ units: 2, activation: 'softmax' }));
+
+            classifier.compile({
+                optimizer: tf.train.adam(0.001),
+                loss: 'categoricalCrossentropy',
+                metrics: ['accuracy']
+            });
+        }
+
+        async function startCamera() {
+            const overlay = document.getElementById('loading-overlay');
+            overlay.classList.remove('hidden');
+            
+            try {
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await faceMesh.send({image: videoElement});
+                        await pose.send({image: videoElement});
+                    },
+                    width: 640,
+                    height: 480
+                });
+                await camera.start();
+                
+                document.getElementById('cam-status-dot').className = 'w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]';
+                document.getElementById('cam-status-text').innerText = 'Streaming';
+                document.getElementById('start-btn').classList.add('hidden');
+                addLog("이미지 센서 동기화 완료. 엔진 기동.");
+                overlay.classList.add('hidden');
+            } catch (err) {
+                showModal("Access Denied", "웹캠 연결에 실패했습니다. 권한 설정을 확인해주세요.");
+                overlay.classList.add('hidden');
+            }
+        }
+
+        let latestFace = null;
+        let latestPose = null;
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            // 얼굴 랜드마크 렌더링 (화이트 스타일)
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                latestFace = results.multiFaceLandmarks[0];
+                drawConnectors(canvasCtx, latestFace, FACEMESH_TESSELATION, {color: '#ffffff30', lineWidth: 0.5});
+                updateBadge('face-badge', 'Active', 'bg-indigo-100 text-indigo-600');
+            } else {
+                updateBadge('face-badge', 'Missing', 'bg-slate-100 text-slate-400');
+            }
+
+            // 포즈 렌더링 (인디고 네온 스타일)
+            if (results.poseLandmarks) {
+                latestPose = results.poseLandmarks;
+                drawConnectors(canvasCtx, latestPose, POSE_CONNECTIONS, {color: '#6366f1', lineWidth: 2});
+                drawLandmarks(canvasCtx, latestPose, {color: '#ffffff', fillColor: '#6366f1', lineWidth: 1, radius: 3});
+                updateBadge('pose-badge', 'Active', 'bg-indigo-100 text-indigo-600');
+            } else {
+                updateBadge('pose-badge', 'Missing', 'bg-slate-100 text-slate-400');
+            }
+            canvasCtx.restore();
+
+            const features = extractFeatures(latestFace, latestPose);
+            if (features) {
+                if (isCollecting) {
+                    trainingData.push({ input: features, label: currentLabel });
+                    updateCounts();
+                }
+                if (isTrained) {
+                    predict(features);
+                }
+            }
+        }
+
+        function extractFeatures(face, pose) {
+            if (!face || !pose) return null;
+            const arr = [];
+            // 특징 벡터 수집: 얼굴(30포인트) + 포즈(30포인트) = 총 120개 수치
+            for (let i = 0; i < 30; i++) arr.push(face[i].x, face[i].y);
+            for (let i = 0; i < 30; i++) {
+                if(pose[i]) arr.push(pose[i].x, pose[i].y);
+                else arr.push(0.5, 0.5);
+            }
+            return arr;
+        }
+
+        window.startCollecting = (label) => {
+            if (!camera) return showModal("Action Required", "먼저 카메라를 활성화해주세요.");
+            isCollecting = true;
+            currentLabel = label;
+            document.getElementById('recording-label').classList.remove('hidden');
+            document.getElementById('video-wrapper').classList.add(`collecting-glow-${label}`);
+        };
+
+        window.stopCollecting = () => {
+            isCollecting = false;
+            document.getElementById('recording-label').classList.add('hidden');
+            document.getElementById('video-wrapper').classList.remove('collecting-glow-0', 'collecting-glow-1');
+            
+            const focus = trainingData.filter(d => d.label === 0).length;
+            const distract = trainingData.filter(d => d.label === 1).length;
+            if (focus > 20 && distract > 20) document.getElementById('train-btn').disabled = false;
+        };
+
+        window.resetData = () => {
+            trainingData = [];
+            updateCounts();
+            isTrained = false;
+            document.getElementById('train-btn').disabled = true;
+            document.getElementById('status-chip').innerText = "학습 데이터 초기화됨";
+            addLog("로컬 세션의 모든 데이터셋을 초기화했습니다.");
+        };
+
+        function updateCounts() {
+            document.getElementById('count-focus').innerText = trainingData.filter(d => d.label === 0).length;
+            document.getElementById('count-distract').innerText = trainingData.filter(d => d.label === 1).length;
+        }
+
+        async function trainModel() {
+            const epochs = parseInt(document.getElementById('epoch-input').value);
+            const container = document.getElementById('train-progress-container');
+            const bar = document.getElementById('train-progress-bar');
+            const percentText = document.getElementById('train-percent');
+            
+            container.classList.remove('hidden');
+            document.getElementById('train-btn').disabled = true;
+
+            const inputs = trainingData.map(d => d.input);
+            const labels = trainingData.map(d => d.label);
+            const xs = tf.tensor2d(inputs);
+            const ys = tf.oneHot(tf.tensor1d(labels, 'int32'), 2);
+
+            addLog(`모델 최적화 프로세스 시작 (데이터셋: ${trainingData.length})`);
+
+            await classifier.fit(xs, ys, {
+                epochs: epochs,
+                shuffle: true,
+                callbacks: {
+                    onEpochEnd: (epoch, logs) => {
+                        const progress = ((epoch + 1) / epochs) * 100;
+                        bar.style.width = `${progress}%`;
+                        percentText.innerText = `${Math.round(progress)}%`;
+                    }
+                }
+            });
+
+            isTrained = true;
+            addLog("딥러닝 가중치 동기화 완료. 실시간 엔진 전환.");
+            document.getElementById('status-chip').innerText = "LIVE 실시간 추론 중";
+            document.getElementById('status-chip').className = "px-4 py-1.5 bg-emerald-100 text-emerald-600 rounded-full text-xs font-black uppercase tracking-widest animate-pulse";
+            showModal("Optimization Complete", "모델 학습이 성공적으로 완료되었습니다. 실시간 분석을 확인하세요.");
+            switchTab('analysis');
+        }
+
+        async function predict(features) {
+            tf.tidy(() => {
+                const input = tf.tensor2d([features]);
+                const prediction = classifier.predict(input);
+                const scores = prediction.dataSync();
+                updateAnalysisUI(scores[0] * 100);
+            });
+        }
+
+        function updateAnalysisUI(score) {
+            const dScore = Math.round(score);
+            const scoreEl = document.getElementById('focus-score');
+            const labelEl = document.getElementById('focus-label');
+            const circle = document.getElementById('score-circle');
+            const bar = document.getElementById('focus-bar');
+            
+            scoreEl.innerText = dScore;
+            bar.style.width = `${dScore}%`;
+            
+            // 원형 게이지 업데이트
+            const offset = 527 - (527 * dScore / 100);
+            circle.style.strokeDashoffset = offset;
+            
+            const poseEl = document.getElementById('pose-detail');
+            const eyeEl = document.getElementById('eye-detail');
+
+            if (dScore > 75) {
+                scoreEl.className = "text-5xl font-black text-emerald-600";
+                labelEl.innerText = "안정적 집중";
+                labelEl.className = "text-lg font-extrabold text-emerald-600 uppercase";
+                circle.classList.replace('text-indigo-600', 'text-emerald-500');
+                circle.classList.replace('text-rose-500', 'text-emerald-500');
+                poseEl.innerText = "수업 지향적 정자세";
+                eyeEl.innerText = "학습 콘텐츠 정면 주시";
+            } else if (dScore > 40) {
+                scoreEl.className = "text-5xl font-black text-amber-500";
+                labelEl.innerText = "주의력 분산";
+                labelEl.className = "text-lg font-extrabold text-amber-500 uppercase";
+                circle.classList.replace('text-emerald-500', 'text-amber-500');
+                circle.classList.replace('text-indigo-600', 'text-amber-500');
+                poseEl.innerText = "다소 불안정한 자세";
+                eyeEl.innerText = "시각적 주의력 저하";
+            } else {
+                scoreEl.className = "text-5xl font-black text-rose-600";
+                labelEl.innerText = "비집중/이탈";
+                labelEl.className = "text-lg font-extrabold text-rose-600 uppercase";
+                circle.classList.replace('text-emerald-500', 'text-rose-500');
+                circle.classList.replace('text-amber-500', 'text-rose-500');
+                poseEl.innerText = "부적절한 자세/엎드림";
+                eyeEl.innerText = "시선 미검출 또는 스마트폰";
+            }
+        }
+
+        // 유틸리티 함수들
+        window.switchTab = (tabId) => {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => {
+                el.classList.remove('bg-white', 'text-indigo-600', 'shadow-sm');
+                el.classList.add('text-slate-500');
+            });
+            document.getElementById(`content-${tabId}`).classList.add('active');
+            const activeTab = document.getElementById(`tab-${tabId}`);
+            activeTab.classList.add('bg-white', 'text-indigo-600', 'shadow-sm');
+            activeTab.classList.remove('text-slate-500');
+        };
+
+        function updateBadge(id, text, classes) {
+            const el = document.getElementById(id);
+            el.innerText = text;
+            el.className = `px-2 py-1 rounded-lg text-[10px] font-bold ${classes}`;
+        }
+
+        function addLog(msg) {
+            const container = document.getElementById('log-container');
+            const div = document.createElement('div');
+            div.className = "border-l-2 border-indigo-500/30 pl-3 py-1";
+            div.innerHTML = `<span class="opacity-30 mr-2">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
+            container.prepend(div);
+        }
+
+        window.showModal = (title, body) => {
+            document.getElementById('modal-title').innerText = title;
+            document.getElementById('modal-body').innerText = body;
+            document.getElementById('modal').classList.replace('hidden', 'flex');
+        };
+
+        window.closeModal = () => document.getElementById('modal').classList.replace('flex', 'hidden');
+    </script>
+</body>
+</html>
